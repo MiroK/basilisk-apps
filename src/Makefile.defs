@@ -1,0 +1,154 @@
+# -*-Makefile-*-
+
+PNG = png
+GENSUM = md5sum
+CHECKSUM = md5sum -c --status
+
+include $(BASILISK)/config
+include Makefile.tests
+
+export GENSUM
+export CHECKSUM
+export CC99
+export CFLAGS
+export CC
+
+QCC = $(BASILISK)/qcc
+
+check: $(subst .c,.tst,$(filter-out $(TESTS),$(filter-out $(EXCLUDE),$(ALLTESTS)))) Makefile.deps
+
+tags: $(subst .page,.tags,$(ALLPAGES))
+
+itags: $(subst .h.page,.h.itags,$(ALLPAGES))
+
+links:
+	sh $(BASILISK)/links.sh
+
+clean:
+	rm -f *.o *.s *.*tst *.d *.prof Makefile.deps
+
+.PRECIOUS: %.prof %.s %.c %.h %.plot
+
+.DELETE_ON_ERROR:
+
+%.3D.c: %.c
+	ln -s $< $@
+
+%.3D.tst: %.3D.s %.3D.c
+	@CFLAGS="$(CFLAGS) -grid=octree" LIBS=$(LIBS) \
+		$(BASILISK)/runtest $@
+
+%.CADNA.c: %.c
+	ln -s $< $@
+
+%.CADNA.tst: %.CADNA.s %.CADNA.c
+	@CFLAGS="$(CFLAGS) -cadna" LIBS="$(LIBS) $(CADNALIBS)" \
+		$(BASILISK)/runtest $@
+
+%.tst: %.s %.c
+	@PNG=$(PNG) LIBS=$(LIBS) $(BASILISK)/runtest $@
+
+%.ctst: %.s %.c
+	@CFLAGS="-grid=multigrid $(CFLAGS)" PNG=$(PNG) LIBS=$(LIBS) \
+		$(BASILISK)/runtest $@
+
+%.vtst: %.s %.c
+	@PNG=$(PNG) LIBS=$(LIBS) EXEC="$(VALGRIND)" $(BASILISK)/runtest $@
+
+%.h: %.h.page
+	ln -s $< $@
+
+%.c: %.c.page
+	ln -s $< $@
+
+%.plot: %.plot.page
+	ln -s $< $@
+
+%.3D.s: %.3D.c $(QCC) Makefile
+	@echo qcc $(CFLAGS) -grid=octree -o $*/$* $*.c $(LIBS) -lm
+	@rm -f $*/warn
+	@$(QCC) -nolineno $(STRIPFLAGS) $(subst -g ,,$(subst -O2 ,,$(CFLAGS) -grid=octree)) $< -o $@ $(LIBS) -lm
+
+%.s: %.c $(QCC) Makefile
+	@echo qcc $(CFLAGS) -o $*/$* $*.c $(LIBS) -lm
+	@rm -f $*/warn
+	@$(QCC) -nolineno $(STRIPFLAGS) $(subst -g ,,$(subst -O2 ,,$(CFLAGS))) $< -o $@ $(LIBS) -lm
+
+%.prof: %.c
+	$(QCC) $(subst -DTRASH=1,,$(CFLAGS)) -g -pg $< -o $*/$* -lm
+	cd $* && ./$* 2> log > out
+	gprof $*/$* $*/gmon.out > $@
+
+%.dot: %.prof
+	gprof2dot.py < $< > $@
+
+%.dot.png: %.dot
+	dot -Tpng -o $@ < $<
+
+%/plot.png: %.plot
+	cd $* && gnuplot -e "batch=1; PNG=\"$(PNG)\"; set term $(PNG) enhanced font \",10\"; set output 'plot.png'; set macros;" ../$< || rm -f plot.png
+
+%/plots: %.c
+	cd $* && awk -f $(BASILISK)/gnuplot.awk < ../$*.c > plots && \
+	PNG=$(PNG) sh $(BASILISK)/gnuplot.sh || rm -f plots
+
+%.gnu: %.eps
+	pstoedit -f gnuplot -flat 0.1 $< $@
+
+%.pdf: %.h
+	pandoc -o $@ $<
+
+%.pdf: %.c
+	pandoc -o $@ $<
+
+%.tags: %.page $(QCC)
+	$(QCC) -tags $<
+	( ! test -d $(BASILISK_WIKI)/cache ) || \
+	rm -f $(subst $(BASILISK_WIKI),$(BASILISK_WIKI)/cache,$(PWD))/$<
+
+%.itags: %.tags $(subst .page,.tags,$(ALLPAGES)) $(BASILISK)/includedin.sh
+	sh $(BASILISK)/includedin.sh $(subst .tags,,$<) > $@
+	( ! test -d $(BASILISK_WIKI)/cache ) || \
+	rm -f $(subst $(BASILISK_WIKI),$(BASILISK_WIKI)/cache,$(PWD))/$(subst .tags,.page,$<)
+
+# lists external symbols of executables
+extern = nm -u $(1) | sed -n 's/^[ ]*U \(.*\)/\1/p' | sort | uniq
+
+whitelist: $(subst .c,.exe,$(filter-out $(EXCLUDE),$(ALLTESTS))) \
+	$(subst .ctst,.cexe,$(SPECIAL_TESTS))
+	@echo "updating whitelist"
+	@$(call extern,$^) > whitelist
+
+# checks that an executable only links against whitelisted external symbols
+%.wexe: %.exe
+	@( $(call extern,$<) | diff $(BASILISK)/test/whitelist - | \
+		(sed -n 's/^> *\(.*\)/error: \1 not whitelisted/p') | \
+		grep 'not whitelisted' && rm -f $@ ) || cp -f $< $@
+	@test -f $@
+
+# python modules
+%.i: %.c $(QCC)
+	$(QCC) $(CFLAGS) -python -c $(MDFLAGS) -I$(PYTHONPATH) $<
+
+%.py: %.i
+	swig -I$(BASILISK) -python $*.i
+	$(CC) $(CFLAGS) -c $(MDFLAGS) -I$(PYTHONPATH) $*_wrap.c
+	$(CC) -shared $*.o $*_wrap.o -o _$*.so
+
+# generated makefiles
+Makefile.tests: Makefile $(BASILISK)/tests.sh
+	sh $(BASILISK)/tests.sh
+
+%.s.d: %.c $(QCC)
+	$(QCC) -MD -o $@ $<
+
+%.tags.d: %.page $(QCC)
+	$(QCC) -MD -tags $<
+
+Makefile.deps: 	Makefile.tests \
+		$(subst .c,.s.d,$(filter-out $(EXCLUDE),$(ALLTESTS) $(TESTS))) \
+		$(subst .page,.tags.d,$(ALLPAGES))
+	@echo "updating Makefile.deps"
+	@cat /dev/null $^ > Makefile.deps
+
+include Makefile.deps

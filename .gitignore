@@ -1,0 +1,4 @@
+*.x
+*.vtu
+src/examples
+src/figures

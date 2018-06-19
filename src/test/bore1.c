@@ -1,0 +1,1 @@
+bore1.c.page
